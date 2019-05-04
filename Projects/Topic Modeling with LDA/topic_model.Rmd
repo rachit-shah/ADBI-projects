@@ -1,0 +1,309 @@
+---
+title: "Topic Modeling"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: spacelab
+---
+# Introduction
+
+How to select the hyperparameters in topic models is the most crucial part of any topic modeling task. 
+
+For example, the **alpha** parameter controls the convergence of document-topic distribution. A small alpha gives a strong weight to the most influential topic for the document, meaning the model will more likely to consider the document is composed of a small number of topics, and vice versa. *A  rule of thumb given by Griffiths & Steyvers(2004)  is to use   50/k, where k is the number of topics.*
+
+Another example is **beta** (or delta in Gibbs Sampling code), which controls the convergence of the word distribution under each topic. Similar to alpha, when a small beta (delta) is given, the model will most likely to choose a common word from the topic, leading to several peaks in the topic-word distribution. As beta grows bigger, dramatic peaks will start dissappearing, and the model will be more "flat".  *The rule of thumb is to set beta (delta) equal to 0.1.*
+
+While the above mentioned parameteres have a general strategy for selection, how to determine the **cut-off point for top words** and **the number of topics** is not covered. There is not really one best metric for these, and may depend on the task at hand. For example, if the user wishes to get a big picture of the corpus by topic modeling, the user should use a small number of topics to avoid information overloading, but oftentimes autonomous methods lead to a higher number of topics. 
+
+In this project, we are to explore two tasks:
+
+1. How many top words should be picked from the topics:
+    + Cut-off point
+2. How many topics should be used:
+    + Perplexity 
+    + Extrinsic Method
+    + Intrinsic Method
+    + Document clustering 
+
+## Submission Instructions
+Complete the missing components of this RMD file and then submit a zip file that contains this RMD file and the generated PDF or html document showing the code and its output.
+
+## Loading Relevant Packages
+Here are some packages you will probably want to load. You may have to install these packages if you haven't before. Also, if you use other packages in the rest of your code, add the packages to this list.
+```{r message=FALSE}
+library(topicmodels)
+library(ggplot2)
+library(tm)
+library(stringr)
+SEED = 3456
+data("AssociatedPress", package="topicmodels")
+```
+
+
+# Selecting Top Words
+To determine the number of top words to be selected, we can leverage the posterior probabilities of p(Word|Topic) and use the **elbow method**. The elbow method is an inexact technique that can be used in various applications to help determine a good value for some parameter by looking at a plot, where the x-axis contains the parameter value (in this case, number of words) and the y-axis contains the variable of interest (in this case, probabilities), and determining an x-value where there is an "elbow" or different rate of change that creates an angle in the plot. 
+
+First, let's run LDA with 20 topics.
+```{r}
+LDA_model <- LDA(AssociatedPress, control=list(iter=20, seed=SEED), k=20, method="Gibbs")
+```
+
+Next, find the top 100 probabilities, p(Word|Topic), and their corresponding words. To do this, for each word (column in the @beta matrix of the LDA model), find the max p(Word|Topic) value. This will give you a list of the highest probabilities each word has for all the topics. Sort this list to find the top-100.
+```{r}
+probmat <- exp(LDA_model@beta) #values in beta matrix are log transform of actual probabilities
+#for each word find max p(word|topic) value
+maxprob <- c()
+for(i in seq(1,dim(probmat)[2],1)){
+  maxprob[i] <- max(probmat[,i])
+}
+#sort and find top100 probabilities and corresponding words
+maxprob_sorted <- sort(maxprob,decreasing = TRUE, index.return = TRUE)
+top100_probs <- maxprob_sorted$x[1:100]
+top100_words <- LDA_model@terms[maxprob_sorted$ix[1:100]]
+```
+
+Now, plot the top-100 values.
+```{r}
+plot(top100_probs,xlab="Word",ylab="Max_Prob",type = "o")
+points(8,top100_probs[8],col="red")
+```
+
+Based on your plot, what seems like a reasonable cut off point for the number of top words? Print these words.
+```{r}
+#The elbow seems to be around point 8, so 8 seems to be a reasonable cutoff point
+top100_words[1:8]
+```
+
+
+# Number of topics
+In the previous section, we performed LDA with 20 topics; however, you may not know how many topics there should be. Now, we will explore methods for determining the number of topics to use.
+
+## Perplexity
+Perplexity often requires splitting the dataset into a training and test set to evaluate the model. The intuition behind perplexity is to compare the word log-likelihood with the test data. If highly probable words in the model are also common words in test data, then it means the topic model summarizes the data well.
+
+Build ten LDA models by spanning the number of topics k from 20 to 200 in increments of 20. Use the first 1500 documents of AssociatedPress as the training set and the remaining documents as the test set (for the calculation of perplexity). Plot the perplexity values for these ten LDA models, which you can determine using the `perplexity` function from the topicmodels package.
+
+```{r}
+train <- AssociatedPress[1:1500,]
+test <- AssociatedPress[-(1:1500),]
+lda_models <- c()
+perp_models <- c()
+for(i in seq(20,200,20)){
+  lda_model <- LDA(train, control=list(iter=20, seed=SEED), k=i, method="Gibbs")
+  lda_models <- c(lda_models,lda_model)
+  perp_models <- c(perp_models,perplexity(lda_model,test))
+}
+plot(seq(20,200,20),perp_models,xlab="No. of Topics",ylab="Perplexity",type="o",axes=FALSE)
+axis(1,seq(20,200,20))
+axis(2,seq(0,max(perp_models)+50,100))
+points(100,perp_models[5],col="red")
+```
+
+Note that perplexity drops infinitely as number of topic grows. So instead of finding the minimum perplexity, common practice selects the elbow point of perplexity growth. 
+
+
+## Extrinsic Topic Coherence 
+
+Extrinsic (in contrast to intrinsic) requires an additional dataset. The extrinsic topic coherence measure takes the top N words in each topic and sees how often does the word pair appears in a common corpus (e.g., Wikipedia). 
+
+Here we use the Normalized Pointwise Mutual Information (NPMI) metric (Nguyen et al, 2015), though there are many other extinsic metrics available that work similarly. 
+
+For simplicity and performance reasons (loading Wikipeida is very slow), we use the Yelp dataset and split it into training (1k reviews) and a common corpus (19K reviews), testing the model on the latter part.  But notice this is not a common approach, and, in practice, should be performed on a larger corpus.
+
+Also, in the original paper (Nguyen et al, 2015), the author uses a sliding window approach to model word pair co-occurence. For simplicity, we take co-occurence based on co-occurred words in documents, and further penalized it to make NPMI measure negative. 
+First, lets load the Yelp dataset and clean it up.
+```{r}
+yelp = read.csv("yelp.txt", header=FALSE, quote="", sep="|")
+yelp_text =  as.list(levels(yelp$V1))
+clean_yelp = gsub("&amp", "", yelp_text)
+clean_yelp = gsub("(RT|via)((?:\\b\\W*@\\w+)+)", "", clean_yelp)
+clean_yelp = gsub("@\\w+", "", clean_yelp)
+clean_yelp = gsub("[[:punct:]]", "", clean_yelp)
+clean_yelp = gsub("[[:digit:]]", "", clean_yelp)
+clean_yelp = gsub("http\\w+", "", clean_yelp)
+clean_yelp = gsub("[ \t]{2,}", " ", clean_yelp)
+clean_yelp = gsub("[ \n]{2,}", " ", clean_yelp) 
+clean_yelp = gsub("^\\s+|\\s+$", "", clean_yelp) 
+clean_yelp <- str_replace_all(clean_yelp," "," ")
+clean_yelp <- iconv(clean_yelp, 'UTF-8', 'ASCII',sub = "")
+
+yelp_Corpus <- Corpus(VectorSource(clean_yelp))
+yelp_matrix <- DocumentTermMatrix(yelp_Corpus,control = list(tolower = TRUE, sparse=TRUE, stemming = TRUE, stopwords = TRUE, minWordLength = 3,removeNumbers = TRUE, removePunctuation = TRUE))
+yelp_matrix <- removeSparseTerms(yelp_matrix, 0.995)
+rowTotals <- apply(yelp_matrix , 1, sum) 
+yelp_matrix   <- yelp_matrix[rowTotals> 0, ]  #removing documents that became empty after processing  
+yelp_matrix <- as.matrix(yelp_matrix)
+```
+
+Next, we will create the NPMI and coherence function.
+```{r}
+NPMI = function(DT, m,l){  
+  number_of_documents = dim(DT)[1]
+  p_ml = length(which(DT[,l] >0 & DT[,m] >0))  / (number_of_documents * number_of_documents)
+  
+  p_l = length(which(DT[,l] >0))/number_of_documents
+  
+  p_m = length(which(DT[,m] >0))/number_of_documents
+  # p_ml: probability of word m and word l both appears in a document
+  # p_l: probability of word l appears in a document
+  # p_m: probability of word m appears in a document
+  if (p_ml==0)
+    return(0)
+  else
+    return( log( p_ml  / (p_l * p_m)) / -log(p_ml) )
+  
+}
+
+compute_c <- function(LDA_model, dataset,  top_N, method=c("LCP", "NPMI"), top_K= 0){
+  c = list()
+  if(method == "LCP")
+    method = LCP
+  else
+    method = NPMI
+  top_words <- apply(t(LDA_model), 2, FUN = function(x) sort(x, decreasing = T,index.return = T)$ix[1:top_N]) #find top N words
+
+  #the following nested for-loop computes NPMI or LCP for all word pairs in top N for all topics
+  for( i in 1:dim(top_words)[2]){
+    temp_c = 0
+    for( m in 2:top_N){
+      for(l in 1: (m-1)){
+          temp_c = temp_c + method(dataset,top_words[m,i],top_words[l,i])
+      }
+    }
+    c[[i]] = temp_c
+  }
+  c = as.numeric(c)
+  if(top_K == 0)
+    return( sum(c)/dim(LDA_model)[1])
+  else
+    return( sum(sort(c, decreasing = T,index.return = T)$x[1:top_K]) / top_K  )
+}
+```
+
+Build ten LDA models by spanning the number of topics k from 10 to 100 in increments of 10. Use the first 1000 documents of Yelp as the training set and the remaining documents of Yelp as the test set (for the calculation of coherence). Plot the NPMI coherence values (`compute_c` function) for these fifteen LDA models. For your NPMI coherence calculation, you can use top\_N=15. Since we have a small training set, increase the iterations for LDA to 100.
+
+```{r}
+train <- yelp_matrix[1:1000,]
+test <- yelp_matrix[-(1:1000),]
+lda_models <- c()
+npmi_coh <- c()
+top_N <- 15
+for(i in seq(10,100,10)){
+  lda_model <- LDA(train, control=list(iter=100, seed=SEED), k=i, method="Gibbs")
+  lda_models <- c(lda_models,lda_model)
+  npmi_coh <- c(npmi_coh, compute_c(lda_model@beta,test,top_N,method = "NPMI"))
+}
+plot(seq(10,100,10),npmi_coh,xlab="No. of Topics",ylab="NPMI Coherence",type="o",axes=FALSE)
+axis(1,seq(10,100,10))
+axis(2,seq(round(min(npmi_coh)-1),round(max(npmi_coh)+1),1))
+points(50,npmi_coh[5],col="red")
+```
+
+Similar to perplexity, selecting a cut-off point is better since it grows infinitely.
+
+
+## Intrinsic Topic Coherence
+
+Similar to extrinsic methods, the intrinsic topic coherence measure takes the top N words in each topic, and sees how often does the word pair appear in the training corpus. Similar to perplexity, selecting a cut-off point is better since it grows infinitely.
+
+First, let's define the log-likelihood metric for intrinsic coherence.
+```{r}
+LCP = function(DT, m,l ){  
+  D_ml = length(which(DT[,m] >0 & DT[,l] >0)) 
+  D_l = length(which(DT[,l] >0))
+  D_m = length(which(DT[,m] >0))
+  # D_ml: Number of documents that contain both of word m and word l
+  # D_l: Number of documents that contain word l
+  # D_m: Number of documents that contain word m 
+  
+  return(log( (D_ml + 1) / D_l))
+}
+```
+
+Using the same ten models generated in the previous section, plot the LCP coherence values (`compute_c` function).
+```{r}
+lcp_coh <- c()
+for(lda_model in lda_models){
+  lcp_coh <- c(lcp_coh, compute_c(lda_model@beta,test,top_N,method = "LCP"))
+}
+plot(seq(10,100,10),lcp_coh,xlab="No. of Topics",ylab="LCP Coherence",type="o",axes=FALSE)
+axis(1,seq(10,100,10))
+axis(2,seq(min(lcp_coh)-(min(lcp_coh)%%10),round(max(lcp_coh)+10),10))
+points(50,lcp_coh[5],col="red")
+```
+
+While these methods can take the average coherence of all topics, another common way people use them is to take the most and least K coherent topics from different models and compare. You can optionally try this by setting the top\_K parameter of `compute_c` to 5.
+
+
+## Document Clustering
+
+First build ten LDA models (k from 10 to 100 by 10) over all the documents in the Yelp dataset. For the sake of time, let's restrict it to the first 10,000 documents of Yelp and set the iterations back down to 10.
+```{r}
+subset = yelp_matrix[1:10000,]
+lda_models <- c()
+for(i in seq(10,100,10)){
+  lda_model <- LDA(subset, control=list(iter=10, seed=SEED), k=i, method="Gibbs")
+  lda_models <- c(lda_models,lda_model)
+}
+```
+
+Next, find the topic (cluster) each document belongs to by selecting the topic that has the highest posterior probability for that document. You can find these probabilities in the `@gamma` matrix of the LDA object. Do this for each of the ten LDA models. You can store the results in a list of 10 vectors, where each vector contains 10k elements. Meaning, `clusters[[2]][3]` would give you the cluster ID of the third document in the second LDA model.
+```{r}
+clusters <- vector(mode="list",length=10)
+count = 1
+for(lda_model in lda_models){
+  pos_prob = lda_model@gamma
+  max_pos_prob <- apply(pos_prob, 1, function(x) which(x==max(x))[1]) #If multiple topics with max prob, choose the one with lower index
+  clusters[[count]] <- max_pos_prob
+  count = count + 1
+}
+clusters[[2]][3]
+```
+
+We are assuming each document has a label, that is how we evaluate the document clusters. For illustration purposes, we will just randomly generate these labels, though in practice you would need a training set that is labeled already. Let's say there are ten labels total.
+```{r}
+labels <- rep(1:10, each=1000)
+```
+
+Next, create a function called purity, that takes a cluster assignment and vector of labels as input and calculates the purity of that clustering assignment. An explanation and example of how purity is calculated can be found [here](http://nlp.stanford.edu/IR-book/html/htmledition/evaluation-of-clustering-1.html).
+```{r}
+purity = function(clus_ass, labels){
+  #Create dictionary of cluster assignments to store list of document labels for each cluster ID
+  n_clusters = length(unique(clus_ass))
+  clus_dic <- vector(mode = "list", length = n_clusters)
+  names(clus_dic) <- c(1:n_clusters)
+  for(i in 1:n_clusters){
+    clus_dic[[i]] <- list()
+  }
+  #Iterate through all documents and add label to corresponding cluster Id list
+  for(doc in seq(1,length(clus_ass),1)){
+    clus_id = clus_ass[doc]
+    clus_dic[[clus_id]] <- c(clus_dic[[clus_id]], labels[doc])
+  }
+  #Find mode (most frequent) label for each cluster and add all their frequencies
+  total = 0
+  for(i in 1:n_clusters){
+    mode = names(sort(-table(unlist(clus_dic[[i]]))))[1]
+    freq = sum(unlist(clus_dic[[i]]) == mode)
+    total = total + freq
+  }
+  #Purity is sum of all rightly labeled documents in the cluster divided by total number of documents
+  return(total/length(clus_ass))
+}
+```
+
+Finally, create a plot showing the purity for each of the ten k-values from the trained LDA models.
+```{r}
+purities <- c()
+for(i in 1:10){
+  purities <- c(purities, purity(clusters[[i]],labels))
+}
+plot(seq(10,100,10),purities,xlab="No. of Topics",ylab="Purity",type="o",axes=FALSE)
+axis(1,seq(10,100,10))
+axis(2,seq(round(min(purities)-0.1,2),max(purities)+0.2,0.01))
+```
+
+
+
